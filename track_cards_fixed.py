@@ -120,7 +120,7 @@ class ImprovedCardTracker:
         return cards
 
     def detect_winner_card(self, frame, bbox):
-        """Improved winner card detection using multiple color spaces"""
+        """Improved winner card detection using multiple color spaces and strategies"""
         x, y, w, h = bbox
 
         # Ensure bbox is within frame
@@ -137,42 +137,57 @@ class ImprovedCardTracker:
         if roi.size == 0:
             return False, 0.0
 
-        # Method 1: HSV red detection
+        # Method 1: HSV red detection (primary method)
         hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
 
-        # Red ranges in HSV
-        lower_red1 = np.array([0, 50, 50])
+        # Red ranges in HSV (expanded for better coverage)
+        lower_red1 = np.array([0, 40, 40])      # Reduced saturation threshold
         upper_red1 = np.array([10, 255, 255])
-        lower_red2 = np.array([170, 50, 50])
+        lower_red2 = np.array([170, 40, 40])    # Reduced saturation threshold
         upper_red2 = np.array([180, 255, 255])
 
         mask1 = cv2.inRange(hsv_roi, lower_red1, upper_red1)
         mask2 = cv2.inRange(hsv_roi, lower_red2, upper_red2)
         red_mask = cv2.bitwise_or(mask1, mask2)
 
-        # Method 2: Check for pink/magenta (hearts)
-        lower_pink = np.array([140, 40, 40])
-        upper_pink = np.array([170, 255, 255])
+        # Method 2: Check for pink/magenta (hearts/diamonds)
+        lower_pink = np.array([135, 30, 30])    # Expanded pink range
+        upper_pink = np.array([175, 255, 255])
         pink_mask = cv2.inRange(hsv_roi, lower_pink, upper_pink)
 
         # Combine masks
         combined_mask = cv2.bitwise_or(red_mask, pink_mask)
+
+        # Apply morphological closing to connect nearby red regions
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
 
         # Calculate red ratio
         red_pixels = cv2.countNonZero(combined_mask)
         total_pixels = w * h
         red_ratio = red_pixels / total_pixels if total_pixels > 0 else 0
 
-        # Also check BGR values for red dominance
+        # Method 3: BGR color space analysis
         mean_color = cv2.mean(roi)[:3]  # B, G, R
-        red_dominance = mean_color[2] > (mean_color[0] + mean_color[1]) * 0.6
+        # Check if red channel dominates
+        red_value = mean_color[2]
+        green_value = mean_color[1]
+        blue_value = mean_color[0]
 
-        is_winner = (red_ratio > 0.05 or (red_ratio > 0.02 and red_dominance))
+        # Red should be significantly higher than blue and green
+        red_dominance = (red_value > (blue_value + green_value) * 0.5) and (red_value > 60)
+
+        # Multi-factor decision logic (more lenient)
+        is_winner = (
+            red_ratio > 0.04 or  # Reduced from 0.05
+            (red_ratio > 0.015 and red_dominance) or  # Reduced from 0.02
+            (red_ratio > 0.02 and red_value > 100)  # Additional check for bright red
+        )
 
         return is_winner, red_ratio
 
     def match_cards_advanced(self, prev_cards, curr_cards):
-        """Advanced card matching using position, size, and color"""
+        """Advanced card matching using position, size, aspect ratio, and confidence"""
         if not prev_cards or not curr_cards:
             return {}
 
@@ -184,22 +199,39 @@ class ImprovedCardTracker:
         for i, prev_card in enumerate(prev_cards):
             prev_center = prev_card['center']
             prev_area = prev_card['area']
+            prev_aspect = prev_card['aspect_ratio']
+            prev_confidence = prev_card['confidence']
 
             for j, curr_card in enumerate(curr_cards):
                 curr_center = curr_card['center']
                 curr_area = curr_card['area']
+                curr_aspect = curr_card['aspect_ratio']
+                curr_confidence = curr_card['confidence']
 
-                # Distance cost
+                # Distance cost (lower weight - position changes with motion)
                 distance = np.sqrt(
                     (prev_center[0] - curr_center[0])**2 +
                     (prev_center[1] - curr_center[1])**2
                 )
 
-                # Area similarity cost
+                # Area similarity cost (important - size should be stable)
                 area_diff = abs(prev_area - curr_area) / max(prev_area, curr_area)
 
-                # Combined cost (lower is better)
-                cost = distance + area_diff * 50
+                # Aspect ratio similarity (important - shape should be stable)
+                aspect_diff = abs(prev_aspect - curr_aspect) / max(prev_aspect, curr_aspect, 0.5)
+
+                # Confidence similarity bonus (cards with consistent detection)
+                confidence_sim = 1.0 - abs(prev_confidence - curr_confidence)
+
+                # Weighted combined cost (lower is better)
+                # Prioritize area and aspect ratio stability over position changes
+                cost = (
+                    0.3 * distance +           # Position (30% - flexible)
+                    0.35 * area_diff * 100 +   # Area (35% - important)
+                    0.25 * aspect_diff * 100 + # Shape (25% - important)
+                    -0.1 * confidence_sim * 10 # Confidence bonus (negative = reward)
+                )
+
                 cost_matrix[i, j] = cost
 
         # Find best matches using greedy assignment
@@ -207,8 +239,9 @@ class ImprovedCardTracker:
         used_curr = set()
 
         for i in range(n_prev):
+            # More lenient threshold with improved metrics
             valid_matches = [(cost_matrix[i, j], j) for j in range(n_curr)
-                           if j not in used_curr and cost_matrix[i, j] < 200]
+                           if j not in used_curr and cost_matrix[i, j] < 150]
 
             if valid_matches:
                 best_cost, best_j = min(valid_matches)
@@ -316,8 +349,11 @@ def process_video_fixed(video_path, output_dir="output"):
 
             frame_count += 1
 
-            # Detect cards
-            cards = tracker.detect_cards_improved(frame)
+            # Preprocess frame for better detection (enhancement + denoising)
+            enhanced_frame = tracker.preprocess_frame(frame)
+
+            # Detect cards on enhanced frame
+            cards = tracker.detect_cards_improved(enhanced_frame)
             tracker.stats['cards_detected'] += len(cards)
 
             if cards:
@@ -370,6 +406,9 @@ def process_video_fixed(video_path, output_dir="output"):
                 # Update tracking history
                 if card_id >= 0:
                     tracker.tracking_history[card_id].append((cx, cy))
+                    # Apply trajectory smoothing for winner card (reduce jitter)
+                    if card_id == tracker.winner_id and len(tracker.tracking_history[card_id]) > 3:
+                        tracker.smooth_trajectory(card_id)
 
                 # Choose visualization
                 color = colors[card_id % 3] if card_id >= 0 else (128, 128, 128)
