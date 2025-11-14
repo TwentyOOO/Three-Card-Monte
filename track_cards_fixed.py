@@ -384,6 +384,9 @@ def process_video_fixed(video_path, output_dir="output"):
             # Create annotated frame
             annotated_frame = frame.copy()
 
+            # Store winner bbox for visual effects
+            winner_bbox = None
+
             # Process each card
             for i, card in enumerate(cards):
                 x, y, w, h = card['bbox']
@@ -421,6 +424,25 @@ def process_video_fixed(video_path, output_dir="output"):
                 label = f"Card {card_id}"
                 if card_id == tracker.winner_id:
                     label += " ★ WINNER"
+                    # Store winner bbox for later visual effects
+                    winner_bbox = (x, y, w, h)
+
+                    # 🌈 Boost colors for winner card (higher saturation & brightness)
+                    try:
+                        roi = annotated_frame[y:y+h, x:x+w]
+                        if roi.size > 0:
+                            hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+                            h_c, s_c, v_c = cv2.split(hsv_roi)
+                            # Increase saturation by 40%
+                            s_c = np.clip(s_c.astype(np.float32) * 1.4, 0, 255).astype(np.uint8)
+                            # Increase brightness by 10%
+                            v_c = np.clip(v_c.astype(np.float32) * 1.1, 0, 255).astype(np.uint8)
+                            hsv_boosted = cv2.merge([h_c, s_c, v_c])
+                            roi_boosted = cv2.cvtColor(hsv_boosted, cv2.COLOR_HSV2BGR)
+                            annotated_frame[y:y+h, x:x+w] = roi_boosted
+
+                    except Exception as e:
+                        pass  # Silently skip color boost if error
 
                 # Add confidence score
                 label += f" ({card['confidence']:.2f})"
@@ -431,11 +453,56 @@ def process_video_fixed(video_path, output_dir="output"):
                 # Draw center
                 cv2.circle(annotated_frame, (cx, cy), 6, color, -1)
 
-                # Draw trajectory for winner
+                # Draw trajectory for winner with motion filter
                 if card_id == tracker.winner_id and len(tracker.tracking_history[card_id]) > 1:
                     points = list(tracker.tracking_history[card_id])
                     for j in range(1, len(points)):
-                        cv2.line(annotated_frame, points[j-1], points[j], (0, 255, 255), 3)
+                        x1, y1 = points[j-1]
+                        x2, y2 = points[j]
+                        # Calculate motion distance
+                        motion_dist = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+                        # Only draw line if motion is significant (> 1.5 pixels)
+                        if motion_dist >= 1.5:
+                            cv2.line(annotated_frame, (x1, y1), (x2, y2), (0, 255, 255), 3)
+
+            # 🔲 Blur background with winner card highlighted (if detected)
+            if tracker.winner_id is not None and winner_bbox is not None:
+                try:
+                    x, y, w, h = winner_bbox
+                    # Ensure coordinates are within frame bounds
+                    x = max(0, x)
+                    y = max(0, y)
+                    w = min(w, annotated_frame.shape[1] - x)
+                    h = min(h, annotated_frame.shape[0] - y)
+
+                    if w > 0 and h > 0:
+                        # Create blurred version of frame
+                        blurred = cv2.GaussianBlur(annotated_frame, (51, 51), 0)
+
+                        # Create mask for winner card region (with padding)
+                        mask = np.zeros(annotated_frame.shape[:2], dtype=np.uint8)
+                        cv2.rectangle(mask, (max(0, x-15), max(0, y-15)),
+                                     (min(annotated_frame.shape[1], x+w+15),
+                                      min(annotated_frame.shape[0], y+h+15)), 255, -1)
+
+                        # Inverse mask for background
+                        mask_inv = cv2.bitwise_not(mask)
+
+                        # Blend: blurred background + original winner region
+                        bg_blurred = cv2.bitwise_and(blurred, blurred, mask=mask_inv)
+                        fg_original = cv2.bitwise_and(annotated_frame, annotated_frame, mask=mask)
+
+                        annotated_frame = cv2.add(bg_blurred, fg_original)
+
+                        # ✨ Add subtle glow around winner (transparent overlay)
+                        overlay = annotated_frame.copy()
+                        cv2.rectangle(overlay, (max(0, x-10), max(0, y-10)),
+                                     (min(annotated_frame.shape[1], x+w+10),
+                                      min(annotated_frame.shape[0], y+h+10)), (0, 255, 255), -1)
+                        cv2.addWeighted(overlay, 0.15, annotated_frame, 0.85, 0, annotated_frame)
+
+                except Exception as e:
+                    pass  # Silently skip blur effect if error
 
             # Add info overlay
             info_y = 30
