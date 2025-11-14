@@ -11,7 +11,15 @@ import json
 import os
 import sys
 import traceback
-from scipy.optimize import linear_sum_assignment
+
+# Try to import scipy for Hungarian Algorithm, fallback to greedy matching
+try:
+    from scipy.optimize import linear_sum_assignment
+    HAS_SCIPY = True
+except ImportError:
+    HAS_SCIPY = False
+    print("⚠️  Warning: scipy not installed. Using greedy matching instead of Hungarian Algorithm.")
+    print("   Install scipy: pip install scipy")
 
 
 class KalmanFilter:
@@ -318,35 +326,38 @@ class ImprovedCardTracker:
 
                 cost_matrix[i, j] = cost
 
-        # Use Hungarian Algorithm for optimal assignment
-        # This guarantees the globally optimal matching (not just greedy)
-        try:
-            row_indices, col_indices = linear_sum_assignment(cost_matrix)
+        # Use Hungarian Algorithm if available, else fallback to greedy matching
+        if HAS_SCIPY:
+            try:
+                row_indices, col_indices = linear_sum_assignment(cost_matrix)
 
-            # Build matches with cost threshold
-            matches = {}
-            for i, j in zip(row_indices, col_indices):
-                # Only accept matches with reasonable cost
-                if cost_matrix[i, j] < 150:
-                    matches[i] = j
+                # Build matches with cost threshold
+                matches = {}
+                for i, j in zip(row_indices, col_indices):
+                    # Only accept matches with reasonable cost
+                    if cost_matrix[i, j] < 150:
+                        matches[i] = j
 
-            return matches
+                return matches
 
-        except Exception:
-            # Fallback to greedy matching if Hungarian Algorithm fails
-            matches = {}
-            used_curr = set()
+            except Exception:
+                # If Hungarian fails, fallback to greedy
+                pass
 
-            for i in range(n_prev):
-                valid_matches = [(cost_matrix[i, j], j) for j in range(n_curr)
-                               if j not in used_curr and cost_matrix[i, j] < 150]
+        # Greedy matching (either scipy not available or Hungarian failed)
+        matches = {}
+        used_curr = set()
 
-                if valid_matches:
-                    best_cost, best_j = min(valid_matches)
-                    matches[i] = best_j
-                    used_curr.add(best_j)
+        for i in range(n_prev):
+            valid_matches = [(cost_matrix[i, j], j) for j in range(n_curr)
+                           if j not in used_curr and cost_matrix[i, j] < 150]
 
-            return matches
+            if valid_matches:
+                best_cost, best_j = min(valid_matches)
+                matches[i] = best_j
+                used_curr.add(best_j)
+
+        return matches
 
     def smooth_trajectory(self, card_id):
         """Apply smoothing to trajectory to reduce jitter"""
@@ -452,6 +463,7 @@ def process_video_fixed(video_path, output_dir="output"):
 
     prev_cards = []
     card_ids = {}
+    cards = []  # Initialize to prevent UnboundLocalError if video has no frames
     colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]  # BGR
     frame_count = 0
     success_count = 0
@@ -525,9 +537,14 @@ def process_video_fixed(video_path, output_dir="output"):
 
                 # Update tracking history
                 if card_id >= 0:
-                    tracker.tracking_history[card_id].append((cx, cy))
                     # Update Kalman filter with new position (smooth tracking)
                     tracker.update_kalman(card_id, (cx, cy))
+                    # Get smoothed position from Kalman for drawing
+                    kalman_pos = tracker.get_kalman_position(card_id)
+                    if kalman_pos is not None:
+                        cx, cy = kalman_pos  # Use Kalman-smoothed position
+                    # Store history with smoothed position
+                    tracker.tracking_history[card_id].append((cx, cy))
                     # Apply trajectory smoothing for winner card (reduce jitter)
                     if card_id == tracker.winner_id and len(tracker.tracking_history[card_id]) > 3:
                         tracker.smooth_trajectory(card_id)
@@ -786,16 +803,18 @@ def process_video_fixed(video_path, output_dir="output"):
 
         # Try to verify video is readable
         test_cap = cv2.VideoCapture(output_video_path)
-        if test_cap.isOpened():
-            # Try reading first frame to verify integrity
-            ret, _ = test_cap.read()
-            if ret:
-                print("✅ Verified: Output video is readable")
+        try:
+            if test_cap.isOpened():
+                # Try reading first frame to verify integrity
+                ret, _ = test_cap.read()
+                if ret:
+                    print("✅ Verified: Output video is readable")
+                else:
+                    print("⚠️  Warning: Output video opened but no frames could be read")
             else:
-                print("⚠️  Warning: Output video opened but no frames could be read")
-            test_cap.release()
-        else:
-            print("⚠️  Warning: Could not open output video for verification")
+                print("⚠️  Warning: Could not open output video for verification")
+        finally:
+            test_cap.release()  # Always release, even if error occurs
     else:
         print("❌ Output video was not created")
 
