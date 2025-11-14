@@ -183,10 +183,13 @@ class ImprovedCardTracker:
                     cy = y + h // 2
 
                     # Calculate confidence based on multiple factors
+                    # Aspect ratio score: higher when closer to ideal 1.4
+                    aspect_score = 1.0 - min(1.0, abs(aspect_ratio - 1.4) / 0.5)
+
                     confidence = min(1.0, (
-                        0.4 * min(1.0, area / 20000) +  # Size factor
-                        0.3 * min(1.0, abs(aspect_ratio - 1.4) / 0.5) +  # Aspect ratio factor
-                        0.3 * rectangularity  # Shape factor
+                        0.4 * min(1.0, area / 20000) +  # Size factor (0.4 weight)
+                        0.3 * aspect_score +             # Aspect ratio factor (0.3 weight) - rewards cards closer to 1.4
+                        0.3 * rectangularity             # Shape factor (0.3 weight)
                     ))
 
                     cards.append({
@@ -526,7 +529,8 @@ def process_video_fixed(video_path, output_dir="output"):
                 if tracker.winner_id is None and frame_count < 90:
                     is_winner, red_ratio = tracker.detect_winner_card(frame, card['bbox'])
 
-                    if is_winner and red_ratio > 0.05:
+                    # Trust the advanced detection logic in detect_winner_card
+                    if is_winner:
                         tracker.winner_id = card_id
                         tracker.winner_initial_pos = (cx, cy)
                         tracker.stats['winner_detected_frame'] = frame_count
