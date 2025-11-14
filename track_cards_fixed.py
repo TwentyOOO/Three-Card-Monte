@@ -427,8 +427,11 @@ def process_video_fixed(video_path, output_dir="output"):
 
             # Progress update
             if frame_count % 60 == 0:
-                progress = (frame_count / total_frames) * 100
-                print(f"⏳ Progress: {progress:.1f}% ({frame_count}/{total_frames} frames)")
+                if total_frames > 0:
+                    progress = (frame_count / total_frames) * 100
+                    print(f"⏳ Progress: {progress:.1f}% ({frame_count}/{total_frames} frames)")
+                else:
+                    print(f"⏳ Progress: {frame_count} frames processed (total_frames = 0)")
 
             prev_cards = cards
 
