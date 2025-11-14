@@ -11,10 +11,92 @@ import json
 import os
 import sys
 import traceback
+from scipy.optimize import linear_sum_assignment
+
+
+class KalmanFilter:
+    """Simple 2D Kalman Filter for smooth position tracking"""
+
+    def __init__(self, dt=0.1, process_variance=0.01, measurement_variance=4):
+        """
+        Initialize Kalman Filter for 2D position tracking
+
+        Args:
+            dt: Time step
+            process_variance: Process noise covariance (system uncertainty)
+            measurement_variance: Measurement noise covariance (sensor uncertainty)
+        """
+        self.dt = dt
+        self.process_variance = process_variance
+        self.measurement_variance = measurement_variance
+
+        # State: [x, y, vx, vy] (position and velocity)
+        self.state = np.array([0.0, 0.0, 0.0, 0.0])
+
+        # State transition matrix
+        self.F = np.array([
+            [1, 0, dt, 0],
+            [0, 1, 0, dt],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1]
+        ], dtype=np.float32)
+
+        # Measurement matrix (we only measure position)
+        self.H = np.array([
+            [1, 0, 0, 0],
+            [0, 1, 0, 0]
+        ], dtype=np.float32)
+
+        # Process covariance
+        self.Q = np.eye(4) * process_variance
+
+        # Measurement covariance
+        self.R = np.eye(2) * measurement_variance
+
+        # Estimate error covariance
+        self.P = np.eye(4)
+
+        self.initialized = False
+
+    def predict(self):
+        """Predict next state without measurement"""
+        self.state = self.F @ self.state
+        self.P = self.F @ self.P @ self.F.T + self.Q
+        return self.state[:2]
+
+    def update(self, measurement):
+        """Update state with new measurement"""
+        if not self.initialized:
+            self.state[0] = measurement[0]
+            self.state[1] = measurement[1]
+            self.initialized = True
+            return
+
+        # Innovation
+        z = np.array(measurement, dtype=np.float32)
+        y = z - self.H @ self.state
+
+        # Innovation covariance
+        S = self.H @ self.P @ self.H.T + self.R
+
+        # Kalman gain
+        K = self.P @ self.H.T @ np.linalg.inv(S)
+
+        # Update state
+        self.state = self.state + K @ y
+
+        # Update covariance
+        self.P = (np.eye(4) - K @ self.H) @ self.P
+
+    def get_position(self):
+        """Get current estimated position"""
+        return tuple(self.state[:2].astype(int))
+
 
 class ImprovedCardTracker:
     def __init__(self):
         self.tracking_history = defaultdict(lambda: deque(maxlen=200))
+        self.kalman_filters = {}  # Store Kalman filters for each card
         self.winner_id = None
         self.winner_initial_pos = None
         self.winner_final_pos = None
@@ -187,7 +269,10 @@ class ImprovedCardTracker:
         return is_winner, red_ratio
 
     def match_cards_advanced(self, prev_cards, curr_cards):
-        """Advanced card matching using position, size, aspect ratio, and confidence"""
+        """
+        Advanced card matching using Hungarian Algorithm (optimal assignment)
+        Metrics: position, size, aspect ratio, and confidence
+        """
         if not prev_cards or not curr_cards:
             return {}
 
@@ -224,7 +309,6 @@ class ImprovedCardTracker:
                 confidence_sim = 1.0 - abs(prev_confidence - curr_confidence)
 
                 # Weighted combined cost (lower is better)
-                # Prioritize area and aspect ratio stability over position changes
                 cost = (
                     0.3 * distance +           # Position (30% - flexible)
                     0.35 * area_diff * 100 +   # Area (35% - important)
@@ -234,21 +318,35 @@ class ImprovedCardTracker:
 
                 cost_matrix[i, j] = cost
 
-        # Find best matches using greedy assignment
-        matches = {}
-        used_curr = set()
+        # Use Hungarian Algorithm for optimal assignment
+        # This guarantees the globally optimal matching (not just greedy)
+        try:
+            row_indices, col_indices = linear_sum_assignment(cost_matrix)
 
-        for i in range(n_prev):
-            # More lenient threshold with improved metrics
-            valid_matches = [(cost_matrix[i, j], j) for j in range(n_curr)
-                           if j not in used_curr and cost_matrix[i, j] < 150]
+            # Build matches with cost threshold
+            matches = {}
+            for i, j in zip(row_indices, col_indices):
+                # Only accept matches with reasonable cost
+                if cost_matrix[i, j] < 150:
+                    matches[i] = j
 
-            if valid_matches:
-                best_cost, best_j = min(valid_matches)
-                matches[i] = best_j
-                used_curr.add(best_j)
+            return matches
 
-        return matches
+        except Exception:
+            # Fallback to greedy matching if Hungarian Algorithm fails
+            matches = {}
+            used_curr = set()
+
+            for i in range(n_prev):
+                valid_matches = [(cost_matrix[i, j], j) for j in range(n_curr)
+                               if j not in used_curr and cost_matrix[i, j] < 150]
+
+                if valid_matches:
+                    best_cost, best_j = min(valid_matches)
+                    matches[i] = best_j
+                    used_curr.add(best_j)
+
+            return matches
 
     def smooth_trajectory(self, card_id):
         """Apply smoothing to trajectory to reduce jitter"""
@@ -271,6 +369,25 @@ class ImprovedCardTracker:
             smoothed.append((int(avg_x), int(avg_y)))
 
         self.tracking_history[card_id] = deque(smoothed, maxlen=200)
+
+    def update_kalman(self, card_id, position):
+        """Update Kalman filter with new card position"""
+        if card_id not in self.kalman_filters:
+            self.kalman_filters[card_id] = KalmanFilter()
+
+        self.kalman_filters[card_id].update(position)
+
+    def predict_position(self, card_id):
+        """Predict next position using Kalman filter"""
+        if card_id in self.kalman_filters:
+            return self.kalman_filters[card_id].predict()
+        return None
+
+    def get_kalman_position(self, card_id):
+        """Get smoothed position from Kalman filter"""
+        if card_id in self.kalman_filters:
+            return self.kalman_filters[card_id].get_position()
+        return None
 
 def process_video_fixed(video_path, output_dir="output"):
     """Fixed video processing with proper error handling"""
@@ -409,6 +526,8 @@ def process_video_fixed(video_path, output_dir="output"):
                 # Update tracking history
                 if card_id >= 0:
                     tracker.tracking_history[card_id].append((cx, cy))
+                    # Update Kalman filter with new position (smooth tracking)
+                    tracker.update_kalman(card_id, (cx, cy))
                     # Apply trajectory smoothing for winner card (reduce jitter)
                     if card_id == tracker.winner_id and len(tracker.tracking_history[card_id]) > 3:
                         tracker.smooth_trajectory(card_id)
