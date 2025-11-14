@@ -256,7 +256,12 @@ def process_video_fixed(video_path, output_dir="output"):
         return False
 
     # Get video properties
-    fps = int(cap.get(cv2.CAP_PROP_FPS))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps <= 0:
+        print("⚠️  Warning: FPS reported as 0, defaulting to 30")
+        fps = 30
+    fps = int(fps)
+
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -266,7 +271,13 @@ def process_video_fixed(video_path, output_dir="output"):
     print(f"   Resolution: {width}x{height}")
     print(f"   FPS: {fps}")
     print(f"   Total Frames: {total_frames}")
-    print(f"   Duration: {total_frames/fps:.2f} seconds")
+
+    if fps > 0:
+        duration = total_frames / fps
+        print(f"   Duration: {duration:.2f} seconds")
+    else:
+        print(f"   Duration: Unknown (FPS = 0)")
+
     print(f"\n{'='*60}\n")
 
     # Setup video writer with proper codec
@@ -489,21 +500,29 @@ def process_video_fixed(video_path, output_dir="output"):
 
     avg_confidence = np.mean(tracker.stats['detection_confidence']) if tracker.stats['detection_confidence'] else 0
 
+    # Calculate success rate safely (avoid division by zero)
+    if frame_count > 0:
+        success_rate = (1 - tracker.stats['tracking_losses'] / frame_count) * 100
+    else:
+        success_rate = 0.0
+
     print(f"\n📊 Statistics:")
     print(f"   - Frames processed: {frame_count}")
     print(f"   - Cards detected: {tracker.stats['cards_detected']}")
     print(f"   - Avg detection confidence: {avg_confidence:.2f}")
     print(f"   - Tracking losses: {tracker.stats['tracking_losses']}")
-    print(f"   - Success rate: {(1 - tracker.stats['tracking_losses']/frame_count)*100:.1f}%")
+    print(f"   - Success rate: {success_rate:.1f}%")
 
     # Save report
+    duration = total_frames / fps if fps > 0 else 0.0
+
     report = {
         'video_info': {
             'path': video_path,
             'resolution': f"{width}x{height}",
             'fps': fps,
             'total_frames': total_frames,
-            'duration': total_frames / fps
+            'duration': duration
         },
         'tracking_results': {
             'winner_id': tracker.winner_id,
@@ -540,36 +559,46 @@ def process_video_fixed(video_path, output_dir="output"):
         # Try to verify video is readable
         test_cap = cv2.VideoCapture(output_video_path)
         if test_cap.isOpened():
+            # Try reading first frame to verify integrity
+            ret, _ = test_cap.read()
+            if ret:
+                print("✅ Verified: Output video is readable")
+            else:
+                print("⚠️  Warning: Output video opened but no frames could be read")
             test_cap.release()
-            print(f"✅ Output video verified: Readable")
         else:
-            print(f"⚠️  Warning: Output video may be corrupted")
+            print("⚠️  Warning: Could not open output video for verification")
     else:
-        print(f"❌ Output video was not created")
+        print("❌ Output video was not created")
 
     return True
 
+
 def main():
+    """Main entry point for the tracker"""
     if len(sys.argv) < 2:
         print("Usage: python track_cards_fixed.py <video_path> [output_dir]")
         print("\nExample:")
-        print("  python track_cards_fixed.py test.mp4")
-        print("  python track_cards_fixed.py test.mp4 results")
-        return
+        print("  python track_cards_fixed.py input_video.mp4")
+        print("  python track_cards_fixed.py input_video.mp4 results")
+        sys.exit(1)
 
     video_path = sys.argv[1]
     output_dir = sys.argv[2] if len(sys.argv) > 2 else "output"
 
     if not os.path.exists(video_path):
         print(f"❌ Error: Video file not found: {video_path}")
-        return
+        sys.exit(1)
 
     success = process_video_fixed(video_path, output_dir)
 
     if success:
         print("\n🎉 Processing completed successfully!")
+        sys.exit(0)
     else:
         print("\n❌ Processing failed")
+        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
